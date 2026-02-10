@@ -1,25 +1,23 @@
-FROM node:18-slim
+# استفاده از ایمیج رسمی Puppeteer که کروم را از قبل دارد
+FROM ghcr.io/puppeteer/puppeteer:21.5.2
 
-# نصب پکیج‌های سیستمی لازم برای اجرای Chrome
-RUN apt-get update \
-    && apt-get install -y wget gnupg \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
-      --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-# تنظیم متغیر محیطی برای مسیر کروم
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+# تنظیم متغیرهای محیطی
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 WORKDIR /usr/src/app
 
-COPY package*.json ./
-RUN npm install
+# کپی کردن فایل‌های پکیج با دسترسی کاربر pptruser (کاربر امنیتی گوگل)
+COPY --chown=pptruser:pptruser package*.json ./
 
-COPY . .
+# نصب پکیج‌ها
+RUN npm ci
 
+# کپی کردن بقیه فایل‌ها
+COPY --chown=pptruser:pptruser . .
+
+# پورت برنامه
 EXPOSE 3000
-CMD [ "npm", "start" ]
+
+# اجرای برنامه
+CMD [ "node", "index.js" ]
