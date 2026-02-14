@@ -1,6 +1,5 @@
 /**
- * Professional Google SERP Scraper for Railway
- * Uses Puppeteer + Stealth Plugin to mimic real user behavior
+ * Professional Google SERP Scraper for Railway (Optimized)
  */
 
 const express = require('express');
@@ -9,14 +8,19 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const cheerio = require('cheerio');
 const UserAgent = require('user-agents');
 
-// فعال‌سازی پلاگین مخفی‌سازی برای جلوگیری از تشخیص بات
+// فعال‌سازی پلاگین مخفی‌سازی
 puppeteer.use(StealthPlugin());
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// تابع تاخیر تصادفی برای شبیه‌سازی رفتار انسان
+const randomSleep = (min, max) => {
+    return new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min));
+};
+
 app.get('/', async (req, res) => {
-    const { q, gl = 'us', page = 1, device = 'desktop' } = req.query;
+    const { q, gl = 'us', hl = 'en', page = 1, device = 'desktop' } = req.query;
 
     if (!q) {
         return res.status(400).json({ error: "Missing query parameter 'q'" });
@@ -24,125 +28,117 @@ app.get('/', async (req, res) => {
 
     let browser = null;
     try {
-        // راه‌اندازی مرورگر با تنظیمات بهینه برای سرور
+        console.log(`Starting scrape for: ${q}`);
+
+        // راه‌اندازی مرورگر
         browser = await puppeteer.launch({
-            headless: "new", // حالت هدلس جدید (سریع‌تر و طبیعی‌تر)
+            headless: "new",
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
+                '--disable-dev-shm-usage', // حیاتی برای داکر و Railway (جلوگیری از کرش مموری)
                 '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process', 
-                '--disable-gpu'
-            ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
+                '--disable-gpu',
+                '--window-size=1920,1080'
+            ]
         });
 
         const webPage = await browser.newPage();
 
-        // 1. تنظیمات دیوایس و User-Agent
+        // 1. تنظیم User-Agent و Viewport پیشرفته
+        let userAgentStr = '';
         if (device === 'mobile') {
             const userAgent = new UserAgent({ deviceCategory: 'mobile' });
-            await webPage.setUserAgent(userAgent.toString());
+            userAgentStr = userAgent.toString();
             await webPage.setViewport({ width: 375, height: 812, isMobile: true, hasTouch: true });
         } else {
-            const userAgent = new UserAgent({ deviceCategory: 'desktop' });
-            await webPage.setUserAgent(userAgent.toString());
-            await webPage.setViewport({ width: 1366, height: 768 });
+            const userAgent = new UserAgent({ deviceCategory: 'desktop', platform: 'Win32' });
+            userAgentStr = userAgent.toString();
+            await webPage.setViewport({ width: 1366 + Math.floor(Math.random() * 100), height: 768 });
         }
-
-        // 2. محاسبه پارامتر Start برای صفحه‌بندی
-        const start = (parseInt(page) - 1) * 10;
         
-        // ساخت URL گوگل
-        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}&gl=${gl}&start=${start}&hl=en`;
+        // جلوگیری از تشخیص WebDriver
+        await webPage.setUserAgent(userAgentStr);
 
-        // 3. رفتن به صفحه با تایم‌اوت مناسب
-        // waitUntil: 'networkidle2' یعنی صبر کن تا شبکه تقریبا آرام شود (لود کامل)
-        await webPage.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        // 2. ساخت URL
+        const start = (parseInt(page) - 1) * 10;
+        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(q)}&gl=${gl}&hl=${hl}&start=${start}`;
 
-        // 4. مدیریت پاپ‌آپ کوکی (Consent Modal) که در سرورهای اروپا/آمریکا رایج است
+        // 3. رفتن به صفحه
+        // domcontentloaded سریعتر است، اما networkidle2 مطمئن تر است که تمام اسکریپت ها لود شده اند
+        await webPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        
+        // کمی صبر برای لود شدن کامل جاوااسکریپت‌های گوگل
+        await randomSleep(1000, 3000);
+
+        // 4. مدیریت کوکی (Accept All)
         try {
-            // تلاش برای پیدا کردن دکمه "Accept all" یا "Reject all"
-            // این سلکتورها ممکن است تغییر کنند، ما چند حالت رایج را تست می‌کنیم
-            const consentButtons = await webPage.$x("//button[contains(., 'Accept all') or contains(., 'I agree')]");
-            if (consentButtons.length > 0) {
-                await consentButtons[0].click();
-                await webPage.waitForNavigation({ waitUntil: 'networkidle2' });
+            const buttons = await webPage.$x("//button[contains(., 'Accept all') or contains(., 'I agree') or contains(., 'L3')]"); // L3 گاهی کلاس دکمه است
+            if (buttons.length > 0) {
+                await buttons[0].click();
+                await webPage.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(() => {});
             }
-        } catch (e) {
-            // اگر دکمه‌ای نبود یعنی کوکی نخواسته، ادامه می‌دهیم
-        }
+        } catch (e) { /* نادیده گرفتن */ }
 
-        // 5. دریافت محتوای HTML و پارس کردن با Cheerio
+        // 5. دریافت HTML
         const content = await webPage.content();
         const $ = cheerio.load(content);
         const results = [];
 
-        // 6. استخراج نتایج (SERP Extraction Logic)
-        // سلکتورهای گوگل مدام عوض می‌شوند، اما ساختار .g معمولا ثابت است
-        
-        const resultSelector = device === 'mobile' ? 'div.Ww4FFb, div.MjjYud' : 'div.g';
+        // 6. استخراج نتایج (منطق بهبود یافته)
+        // گوگل نتایج را در div.g یا div با کلاس‌های خاص موبایل قرار می‌دهد
+        const resultContainers = $('div.g, div[data-header-feature]');
 
-        $(resultSelector).each((index, element) => {
+        resultContainers.each((i, el) => {
             try {
-                // تلاش برای پیدا کردن تگ h3 (عنوان)
-                const titleEl = $(element).find('h3').first();
-                // تلاش برای پیدا کردن لینک اصلی
-                const linkEl = $(element).find('a').first();
-                // تلاش برای پیدا کردن اسنیپت (توضیحات)
-                const snippetEl = $(element).find('div.VwiC3b, div.yXK7lf, div.MUxGbd').first();
-
-                const title = titleEl.text().trim();
+                // عنوان معمولا در h3 است
+                const title = $(el).find('h3').first().text().trim();
+                
+                // لینک در تگ a که href آن با http شروع می‌شود
+                const linkEl = $(el).find('a[href^="http"]').first();
                 const url = linkEl.attr('href');
-                const snippet = snippetEl.text().trim();
+                
+                // توضیحات (Snippet)
+                const snippet = $(el).find('div[style*="-webkit-line-clamp"], div.VwiC3b, span.aCOpRe').first().text().trim();
 
-                // اعتبارسنجی: حذف لینک‌های تبلیغاتی یا داخلی گوگل
-                if (title && url && url.startsWith('http') && !url.includes('google.com/search')) {
-                    
-                    // استخراج دامنه تمیز
-                    let domain = '';
-                    try {
-                        const urlObj = new URL(url);
-                        domain = urlObj.hostname;
-                    } catch (e) {}
-
+                // فیلتر کردن نتایج نامعتبر
+                if (title && url && !url.includes('google.com')) {
                     results.push({
                         rank: results.length + 1 + start,
-                        title: title,
-                        url: url,
-                        domain: domain,
-                        snippet: snippet
+                        title,
+                        url,
+                        domain: new URL(url).hostname,
+                        snippet
                     });
                 }
             } catch (err) {
-                // اگر یک آیتم خطا داشت، کل پروسه نباید متوقف شود
+                // خطای پارس کردن یک آیتم خاص
             }
         });
 
-        // بررسی اینکه آیا کپچا خوردیم یا نه
-        const isCaptcha = $('form[action*="Captcha"]').length > 0 || $('div:contains("unusual traffic")').length > 0;
+        // بررسی کپچا
+        const isCaptcha = $('form[action*="Captcha"]').length > 0 || $('body').text().includes('unusual traffic');
 
         res.json({
             meta: {
                 query: q,
-                page: page,
-                gl: gl,
-                device: device,
-                total_results: results.length,
-                captcha_detected: isCaptcha
+                results_count: results.length,
+                captcha: isCaptcha,
+                gl,
+                page
             },
             data: results
         });
 
     } catch (error) {
-        console.error("Scraping Error:", error);
-        res.status(500).json({ error: error.message });
+        console.error("Error:", error.message);
+        res.status(500).json({ error: "Failed to scrape", details: error.message });
     } finally {
-        // بستن قطعی مرورگر برای جلوگیری از پر شدن رم سرور
         if (browser) {
+            // بستن تمام صفحات قبل از بستن مرورگر
+            const pages = await browser.pages();
+            await Promise.all(pages.map(p => p.close()));
             await browser.close();
         }
     }
